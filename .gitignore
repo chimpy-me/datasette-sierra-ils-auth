@@ -1,0 +1,33 @@
+# Virtual environments
+.venv
+venv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.eggs
+*.egg-info
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov/
+
+# Build artifacts
+dist
+build
+
+# IDE
+.DS_Store
+.vscode
+.idea
+
+# Dependency lock (not committed for libraries)
+uv.lock
+
+# Environment variables (contains secrets)
+.env
+
+# SQLite databases (created during development/testing)
+*.db

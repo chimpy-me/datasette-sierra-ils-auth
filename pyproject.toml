@@ -1,0 +1,44 @@
+[project]
+name = "datasette-sierra-ils-auth"
+version = "0.1.0"
+description = "Datasette plugin for authenticating staff users against Sierra ILS REST API"
+readme = "README.md"
+authors = [{name = "Ray Voelker"}]
+license = "MIT"
+classifiers=[
+    "Framework :: Datasette"
+]
+requires-python = ">=3.10"
+dependencies = [
+    "datasette",
+    "sierra-ils-utils"
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov>=7.0.0",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+
+[project.urls]
+Homepage = "https://github.com/chimpy-me/datasette-sierra-ils-auth"
+Changelog = "https://github.com/chimpy-me/datasette-sierra-ils-auth/releases"
+Issues = "https://github.com/chimpy-me/datasette-sierra-ils-auth/issues"
+CI = "https://github.com/chimpy-me/datasette-sierra-ils-auth/actions"
+
+[project.entry-points.datasette]
+sierra_ils_auth = "datasette_sierra_ils_auth"
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.setuptools.package-data]
+datasette_sierra_ils_auth = ["static/*", "templates/*"]
+

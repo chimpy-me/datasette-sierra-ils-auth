@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Edit User: {{ user.sierra_login }}{% endblock %}
+
+{% block content %}
+<h1>Edit User: {{ user.sierra_login }}</h1>
+
+{% if message %}
+<p style="color: green; background: #e8f5e9; padding: 10px; border-radius: 4px;">{{ message }}</p>
+{% endif %}
+
+<p><a href="/-/sierra-auth/admin/users">&larr; Back to user list</a></p>
+
+<form method="post">
+    <input type="hidden" name="csrftoken" value="{{ csrftoken() }}">
+
+    <h2>User Details</h2>
+    <table>
+        <tr>
+            <th>Username</th>
+            <td>{{ user.sierra_login }}</td>
+        </tr>
+        <tr>
+            <th>Display Name</th>
+            <td>{{ user.display_name or "-" }}</td>
+        </tr>
+        <tr>
+            <th>Email</th>
+            <td>{{ user.email or "-" }}</td>
+        </tr>
+        <tr>
+            <th>Created</th>
+            <td>{{ user.created_at }}</td>
+        </tr>
+        <tr>
+            <th>Last Login</th>
+            <td>{{ user.last_login_at or "Never" }}</td>
+        </tr>
+    </table>
+
+    <h2>Account Status</h2>
+    <p>
+        <label>
+            <input type="radio" name="is_active" value="1" {% if user.is_active %}checked{% endif %}>
+            Active
+        </label>
+        <label style="margin-left: 20px;">
+            <input type="radio" name="is_active" value="0" {% if not user.is_active %}checked{% endif %}>
+            Inactive
+        </label>
+    </p>
+
+    <h2>Roles</h2>
+    <p>Select the roles for this user:</p>
+    {% for role in roles %}
+    <p>
+        <label>
+            <input type="checkbox" name="roles" value="{{ role.name }}"
+                {% if role.name in user.roles %}checked{% endif %}>
+            <strong>{{ role.name }}</strong>
+            {% if role.description %} - {{ role.description }}{% endif %}
+            {% if role.is_default %}<em>(default for new users)</em>{% endif %}
+        </label>
+    </p>
+    {% endfor %}
+
+    <p style="margin-top: 20px;">
+        <input type="submit" value="Save Changes">
+    </p>
+</form>
+
+<style>
+table {
+    border-collapse: collapse;
+    margin: 1em 0;
+}
+th, td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+th {
+    background-color: #f5f5f5;
+    width: 150px;
+}
+input[type="submit"] {
+    padding: 10px 20px;
+    background: #1976d2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+input[type="submit"]:hover {
+    background: #1565c0;
+}
+</style>
+{% endblock %}

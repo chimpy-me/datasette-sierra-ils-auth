@@ -1,0 +1,11 @@
+services:
+  datasette:
+    build: .
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - datasette_data:/app/data
+
+volumes:
+  datasette_data:
