@@ -113,6 +113,7 @@ Define other roles in Datasette metadata under the plugin's key:
 plugins:
   datasette-sierra-ils-auth:
     default_role: null          # optional; name of a role new users receive (default: none)
+    trust_forwarded: false      # optional; true behind exactly one reverse proxy (see Sign-in attempt cap)
     seed_roles:                 # optional; applied at startup
       reviewer:
         - alt-review-edit
@@ -127,6 +128,26 @@ plugins:
 - Upgrading a v1 database keeps its roles, users and grants as they are; only
   `roles.is_default` is cleared. v0.1.0's `viewer` and `staff` seeds are not
   created on new databases.
+
+### Sign-in attempt cap
+
+After 5 failed sign-ins within 15 minutes, further attempts for that username
+(case-insensitive) or from that address get a 429 ("Too many failed sign-in
+attempts; try again in 15 minutes") and are checked against nothing: no local
+password check and no Sierra call. Failures are missing credentials, a wrong
+password, a non-204 Sierra response and a disabled account. A successful sign-in
+neither counts nor resets the count. The counter is in memory, one per Datasette
+process, and starts empty on restart. Blocked attempts are logged as
+`login_throttled` (username and address, never the password).
+
+The address is the socket peer by default. Set `trust_forwarded: true` only when
+Datasette sits behind exactly one reverse proxy that appends the client address
+(`tailscale serve`, Caddy): the address is then the last `X-Forwarded-For` entry,
+since earlier entries are whatever the client sent. Without a proxy, leave it off.
+
+On any Sierra `users/validate` response other than 204, `auth_log.details` records
+`sierra_status=<status>` and, when the body has one, `code=<n>` (Sierra answers bad
+credentials with 400, code 108). The body text and the password are never logged.
 
 **Do not put `view-instance` on any role except `admin`.** This plugin's
 `permission_allowed` runs after Datasette's built-in default and the last non-None
@@ -150,6 +171,11 @@ it works when Datasette is served under a prefix (`--setting base_url /alt-revie
 - New plugin config `seed_roles` and `default_role` (see Roles).
 - A signed-in user with no role who is denied a page sees a "no role yet" 403 page
   (a `forbidden` hook, plus the plugin's own admin pages).
+- Failed sign-in cap: 5 per 15 minutes per username and per address, 429 beyond
+  it; new plugin config `trust_forwarded` (default false) for the address behind a
+  proxy.
+- Non-204 `users/validate` responses are logged as `sierra_status=<status>` (and
+  `code=<n>`) in `auth_log.details`.
 - All redirects and links (login, logout, admin bounce, menu, templates) respect
   Datasette's `base_url`; `SIERRA_AUTH_LOGIN_REDIRECT` is relative to it.
 

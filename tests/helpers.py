@@ -48,12 +48,13 @@ def csrf(response):
             return cookie.value
 
 
-async def post_login(ds, username, password):
+async def post_login(ds, username, password, headers=None):
     page = await ds.client.get("/-/sierra-auth/login")
     return await ds.client.post(
         "/-/sierra-auth/login",
         data={"username": username, "password": password, "csrftoken": csrf(page)},
         follow_redirects=False,
+        headers=headers,
     )
 
 

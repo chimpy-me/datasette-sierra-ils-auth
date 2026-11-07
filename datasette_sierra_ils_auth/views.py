@@ -7,6 +7,7 @@ import time
 
 from datasette import Response
 
+from .throttle import Throttle
 from . import (
     COOKIE_NAME,
     COOKIE_MAX_AGE,
@@ -18,6 +19,29 @@ from . import (
 )
 
 LOGIN_PATH = "/-/sierra-auth/login"
+
+
+def get_throttle(datasette) -> Throttle:
+    """One throttle per Datasette instance."""
+    if getattr(datasette, "_sierra_throttle", None) is None:
+        datasette._sierra_throttle = Throttle()
+    return datasette._sierra_throttle
+
+
+def client_address(datasette, request) -> str:
+    """Last X-Forwarded-For hop when trust_forwarded is set, else the socket peer.
+
+    Last, not first: a trusted reverse proxy appends the address it saw, so the
+    rightmost entry is the client and earlier ones are client-supplied.
+    """
+    if get_plugin_config(datasette).get("trust_forwarded"):
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            last = forwarded.split(",")[-1].strip()
+            if last:
+                return last
+    client = request.scope.get("client")
+    return (client[0] if client else None) or ""
 
 
 async def login(datasette, request):
@@ -37,8 +61,22 @@ async def login(datasette, request):
     password = form.get("password", "")
 
     auth_db = get_auth_db(datasette)
+    throttle = get_throttle(datasette)
+    addr = client_address(datasette, request)
+
+    if throttle.blocked(sierra_login, addr):
+        auth_db.log_event(sierra_login or "(empty)", "login_throttled", "address=" + addr)
+        return Response.html(
+            await datasette.render_template(
+                "sierra_auth_login.html",
+                {"error": "Too many failed sign-in attempts; try again in 15 minutes"},
+                request=request,
+            ),
+            status=429,
+        )
 
     if not sierra_login or not password:
+        throttle.record_failure(sierra_login, addr)
         auth_db.log_event(sierra_login or "(empty)", "login_failure", "Missing credentials")
         return Response.html(
             await datasette.render_template(
@@ -51,6 +89,7 @@ async def login(datasette, request):
 
     # First, check for local password (built-in admin or other local accounts)
     authenticated = False
+    sierra_detail = None
     if auth_db.check_local_password(sierra_login, password):
         authenticated = True
     else:
@@ -74,6 +113,14 @@ async def login(datasette, request):
             )
             if response.status_code == 204:
                 authenticated = True
+            else:
+                sierra_detail = f"sierra_status={response.status_code}"
+                try:
+                    code = response.json().get("code")
+                except Exception:
+                    code = None
+                if code is not None:
+                    sierra_detail += f" code={code}"
         except Exception as e:
             auth_db.log_event(sierra_login, "login_failure", f"Sierra API error: {e}")
             return Response.html(
@@ -86,7 +133,12 @@ async def login(datasette, request):
             )
 
     if not authenticated:
-        auth_db.log_event(sierra_login, "login_failure", "Invalid credentials")
+        throttle.record_failure(sierra_login, addr)
+        auth_db.log_event(
+            sierra_login,
+            "login_failure",
+            f"Invalid credentials ({sierra_detail})" if sierra_detail else "Invalid credentials",
+        )
         return Response.html(
             await datasette.render_template(
                 "sierra_auth_login.html",
@@ -105,6 +157,7 @@ async def login(datasette, request):
         )
 
     if not user["is_active"]:
+        throttle.record_failure(sierra_login, addr)
         auth_db.log_event(sierra_login, "login_failure", "Account disabled")
         return Response.html(
             await datasette.render_template(
