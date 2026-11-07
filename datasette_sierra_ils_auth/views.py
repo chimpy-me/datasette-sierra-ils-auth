@@ -119,7 +119,7 @@ async def login(datasette, request):
                     code = response.json().get("code")
                 except Exception:
                     code = None
-                if code is not None:
+                if isinstance(code, int):
                     sierra_detail += f" code={code}"
         except Exception as e:
             auth_db.log_event(sierra_login, "login_failure", f"Sierra API error: {e}")

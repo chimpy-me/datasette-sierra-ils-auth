@@ -35,7 +35,7 @@ class StubSierra:
 BAD = {"code": 108, "specificCode": 0, "httpStatus": 400, "name": "Invalid credentials"}
 
 
-async def setup(monkeypatch, tmp_path, stub, plugin_config=None):
+async def setup(monkeypatch, tmp_path, plugin_config=None):
     ds = make_ds(monkeypatch, tmp_path, plugin_config=plugin_config)
     await ds.invoke_startup()
     return ds
@@ -55,7 +55,7 @@ def log_rows(tmp_path):
 
 async def test_sixth_failure_is_refused_without_calling_sierra(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         for _ in range(5):
             assert (await post_login(ds, "zzz-probe", "bad")).status_code == 401
@@ -70,7 +70,7 @@ async def test_sixth_failure_is_refused_without_calling_sierra(monkeypatch, tmp_
 
 async def test_throttled_attempt_skips_local_password_check_too(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         for _ in range(5):
             await post_login(ds, "admin", "wrong")
@@ -80,7 +80,7 @@ async def test_throttled_attempt_skips_local_password_check_too(monkeypatch, tmp
 
 async def test_cap_is_per_address_too(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         for n in range(5):
             assert (await post_login(ds, f"user{n}", "bad")).status_code == 401
@@ -90,7 +90,7 @@ async def test_cap_is_per_address_too(monkeypatch, tmp_path):
 
 async def test_forged_forwarded_for_does_not_reset_the_cap(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub, plugin_config={"trust_forwarded": True})
+    ds = await setup(monkeypatch, tmp_path, plugin_config={"trust_forwarded": True})
     with stubbed(stub):
         for n in range(5):
             r = await post_login(ds, f"user{n}", "bad",
@@ -103,7 +103,7 @@ async def test_forged_forwarded_for_does_not_reset_the_cap(monkeypatch, tmp_path
 
 async def test_forwarded_for_is_ignored_unless_trusted(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)  # trust_forwarded off
+    ds = await setup(monkeypatch, tmp_path)  # trust_forwarded off
     with stubbed(stub):
         for n in range(5):
             await post_login(ds, f"user{n}", "bad", headers={"X-Forwarded-For": f"10.0.0.{n}"})
@@ -111,9 +111,31 @@ async def test_forwarded_for_is_ignored_unless_trusted(monkeypatch, tmp_path):
     assert r.status_code == 429
 
 
+async def test_username_cap_holds_across_addresses_through_the_view(monkeypatch, tmp_path):
+    stub = StubSierra(400, BAD)
+    ds = await setup(monkeypatch, tmp_path, plugin_config={"trust_forwarded": True})
+    with stubbed(stub):
+        for n in range(5):
+            r = await post_login(ds, "Foo", "bad", headers={"X-Forwarded-For": f"10.0.0.{n}"})
+            assert r.status_code == 401
+        # a sixth attempt, new address, differently cased and padded name
+        r = await post_login(ds, "  fOO ", "bad", headers={"X-Forwarded-For": "10.0.0.9"})
+    assert r.status_code == 429 and stub.calls == 5
+
+
+async def test_other_username_from_a_used_address_is_not_blocked(monkeypatch, tmp_path):
+    stub = StubSierra(400, BAD)
+    ds = await setup(monkeypatch, tmp_path, plugin_config={"trust_forwarded": True})
+    with stubbed(stub):
+        for n in range(5):
+            await post_login(ds, "Foo", "bad", headers={"X-Forwarded-For": f"10.0.0.{n}"})
+        r = await post_login(ds, "Bar", "bad", headers={"X-Forwarded-For": "10.0.0.1"})
+    assert r.status_code == 401 and stub.calls == 6
+
+
 async def test_trusted_distinct_last_hops_are_distinct_addresses(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub, plugin_config={"trust_forwarded": True})
+    ds = await setup(monkeypatch, tmp_path, plugin_config={"trust_forwarded": True})
     with stubbed(stub):
         for n in range(5):
             await post_login(ds, f"user{n}", "bad", headers={"X-Forwarded-For": "1.1.1.1"})
@@ -123,7 +145,7 @@ async def test_trusted_distinct_last_hops_are_distinct_addresses(monkeypatch, tm
 
 async def test_non_204_status_is_logged(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         await post_login(ds, "zzz-probe", "hunter2-secret")
     details = [r[2] for r in log_rows(tmp_path) if r[1] == "login_failure"]
@@ -133,7 +155,7 @@ async def test_non_204_status_is_logged(monkeypatch, tmp_path):
 
 async def test_non_204_without_json_body_logs_status_only(monkeypatch, tmp_path):
     stub = StubSierra(500, None)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         r = await post_login(ds, "zzz-probe", "bad")
     assert r.status_code == 401
@@ -143,7 +165,7 @@ async def test_non_204_without_json_body_logs_status_only(monkeypatch, tmp_path)
 
 async def test_window_expires(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     now = [1000.0]
     ds._sierra_throttle = Throttle(clock=lambda: now[0])
     with stubbed(stub):
@@ -166,7 +188,7 @@ async def test_case_folded_username(monkeypatch, tmp_path):
 
 async def test_success_does_not_count(monkeypatch, tmp_path):
     stub = StubSierra(204)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         for _ in range(10):
             assert (await post_login(ds, "good-user", "pw")).status_code == 302
@@ -174,7 +196,7 @@ async def test_success_does_not_count(monkeypatch, tmp_path):
 
 
 async def test_success_does_not_reset_the_cap(monkeypatch, tmp_path):
-    ds = await setup(monkeypatch, tmp_path, None)
+    ds = await setup(monkeypatch, tmp_path)
     ok, bad = StubSierra(204), StubSierra(400, BAD)
     with stubbed(bad):
         for _ in range(4):
@@ -188,7 +210,7 @@ async def test_success_does_not_reset_the_cap(monkeypatch, tmp_path):
 
 async def test_missing_credentials_and_local_mismatch_count(monkeypatch, tmp_path):
     stub = StubSierra(400, BAD)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         for _ in range(3):
             assert (await post_login(ds, "x", "")).status_code == 400
@@ -199,7 +221,7 @@ async def test_missing_credentials_and_local_mismatch_count(monkeypatch, tmp_pat
 
 async def test_disabled_account_counts(monkeypatch, tmp_path):
     stub = StubSierra(204)
-    ds = await setup(monkeypatch, tmp_path, stub)
+    ds = await setup(monkeypatch, tmp_path)
     with stubbed(stub):
         await post_login(ds, "off", "pw")
     db = auth_db_for(tmp_path)
