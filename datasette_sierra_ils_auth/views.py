@@ -7,7 +7,17 @@ import time
 
 from datasette import Response
 
-from . import COOKIE_NAME, COOKIE_MAX_AGE, get_auth_db, get_sierra_client
+from . import (
+    COOKIE_NAME,
+    COOKIE_MAX_AGE,
+    get_auth_db,
+    get_plugin_config,
+    get_sierra_client,
+    has_no_role,
+    no_role_response,
+)
+
+LOGIN_PATH = "/-/sierra-auth/login"
 
 
 async def login(datasette, request):
@@ -89,7 +99,10 @@ async def login(datasette, request):
     # Successful authentication - get or create local user
     user = auth_db.get_user(sierra_login)
     if not user:
-        user = auth_db.create_user(sierra_login)
+        user = auth_db.create_user(
+            sierra_login,
+            default_role=get_plugin_config(datasette).get("default_role"),
+        )
 
     if not user["is_active"]:
         auth_db.log_event(sierra_login, "login_failure", "Account disabled")
@@ -107,7 +120,8 @@ async def login(datasette, request):
     auth_db.log_event(sierra_login, "login_success")
 
     # Create signed session cookie
-    redirect_url = os.environ.get("SIERRA_AUTH_LOGIN_REDIRECT", "/")
+    # SIERRA_AUTH_LOGIN_REDIRECT is a path relative to base_url
+    redirect_url = datasette.urls.path(os.environ.get("SIERRA_AUTH_LOGIN_REDIRECT", "/"))
     response = Response.redirect(redirect_url)
     response.set_cookie(
         COOKIE_NAME,
@@ -121,7 +135,7 @@ async def login(datasette, request):
 
 async def logout(datasette, request):
     """Handle logout - clear the session cookie."""
-    response = Response.redirect("/")
+    response = Response.redirect(datasette.urls.path("/"))
     response.set_cookie(COOKIE_NAME, "", expires=0)
 
     # Log the logout if we can identify the user
@@ -147,11 +161,13 @@ def require_permission(permission):
         async def wrapper(datasette, request):
             actor = request.actor
             if not actor:
-                return Response.redirect("/-/sierra-auth/login")
+                return Response.redirect(datasette.urls.path(LOGIN_PATH))
 
             # Check permission
             if "admin" not in actor.get("roles", []):
                 if permission not in actor.get("_permissions", []):
+                    if has_no_role(actor):
+                        return await no_role_response(datasette, request, actor)
                     return Response.html(
                         await datasette.render_template(
                             "sierra_auth_error.html",
@@ -169,10 +185,12 @@ async def admin_users(datasette, request):
     """Admin page to list and manage users."""
     actor = request.actor
     if not actor:
-        return Response.redirect("/-/sierra-auth/login")
+        return Response.redirect(datasette.urls.path(LOGIN_PATH))
 
     # Check permission
     if "admin" not in actor.get("roles", []) and "manage-users" not in actor.get("_permissions", []):
+        if has_no_role(actor):
+            return await no_role_response(datasette, request, actor)
         return Response.html(
             await datasette.render_template(
                 "sierra_auth_error.html",
@@ -199,9 +217,11 @@ async def admin_user_edit(datasette, request):
     """Edit a specific user's roles."""
     actor = request.actor
     if not actor:
-        return Response.redirect("/-/sierra-auth/login")
+        return Response.redirect(datasette.urls.path(LOGIN_PATH))
 
     if "admin" not in actor.get("roles", []) and "manage-users" not in actor.get("_permissions", []):
+        if has_no_role(actor):
+            return await no_role_response(datasette, request, actor)
         return Response.html(
             await datasette.render_template(
                 "sierra_auth_error.html",

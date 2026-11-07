@@ -35,7 +35,7 @@
             </td>
             <td>{{ user.last_login_at or "Never" }}</td>
             <td>
-                <a href="/-/sierra-auth/admin/users/{{ user.id }}">Edit</a>
+                <a href="{{ urls.path('/-/sierra-auth/admin/users/' ~ user.id) }}">Edit</a>
             </td>
         </tr>
         {% endfor %}

@@ -12,6 +12,8 @@ from sierra_ils_utils import SierraAPI
 
 from .auth_db import AuthDB
 
+PLUGIN_NAME = "datasette-sierra-ils-auth"
+
 COOKIE_NAME = os.environ.get("SIERRA_AUTH_COOKIE_NAME", "ds_sierra_auth")
 COOKIE_MAX_AGE = int(os.environ.get("SIERRA_AUTH_COOKIE_MAX_AGE", 86400))
 
@@ -23,6 +25,11 @@ def get_auth_db(datasette) -> AuthDB:
         # Default to current working directory
         db_path = Path.cwd() / "sierra_auth.db"
     return AuthDB(Path(db_path))
+
+
+def get_plugin_config(datasette) -> dict:
+    """Plugin config from metadata (`plugins: datasette-sierra-ils-auth:`)."""
+    return datasette.plugin_config(PLUGIN_NAME) or {}
 
 
 def get_sierra_client(datasette) -> SierraAPI | None:
@@ -51,6 +58,11 @@ def startup(datasette):
     if admin_password:
         auth_db = get_auth_db(datasette)
         auth_db.create_or_update_admin(admin_password)
+
+    # Apply configured roles (idempotent; never removes an admin's grants)
+    seed_roles = get_plugin_config(datasette).get("seed_roles")
+    if seed_roles:
+        get_auth_db(datasette).apply_seed_roles(seed_roles)
 
 
 @hookimpl
@@ -138,10 +150,49 @@ def menu_links(datasette, actor, request):
         links = []
         # Add admin link if user has permission
         if "admin" in actor.get("roles", []) or "manage-users" in actor.get("_permissions", []):
-            links.append({"href": "/-/sierra-auth/admin/users", "label": "Manage users"})
-        links.append({"href": "/-/sierra-auth/logout", "label": "Log out"})
+            links.append({"href": datasette.urls.path("/-/sierra-auth/admin/users"), "label": "Manage users"})
+        links.append({"href": datasette.urls.path("/-/sierra-auth/logout"), "label": "Log out"})
         return links
     else:
         return [
-            {"href": "/-/sierra-auth/login", "label": "Log in"},
+            {"href": datasette.urls.path("/-/sierra-auth/login"), "label": "Log in"},
         ]
+
+
+@hookimpl
+def forbidden(datasette, request, message):
+    """Explain a 403 to a signed-in user who has no role yet.
+
+    Returns None when there is no actor, so Datasette's default page applies.
+    """
+    actor = request.actor
+    if not has_no_role(actor):
+        return None
+
+    async def inner():
+        return await no_role_response(datasette, request, actor)
+
+    return inner
+
+
+def has_no_role(actor) -> bool:
+    """A signed-in actor holding no role and no permission."""
+    return bool(actor) and not actor.get("roles") and not actor.get("_permissions")
+
+
+async def no_role_response(datasette, request, actor):
+    from datasette import Response
+
+    return Response.html(
+        await datasette.render_template(
+            "sierra_auth_error.html",
+            {
+                "error": (
+                    f"You are signed in as {actor.get('id')} but have no role yet; "
+                    "ask the administrator."
+                )
+            },
+            request=request,
+        ),
+        status=403,
+    )

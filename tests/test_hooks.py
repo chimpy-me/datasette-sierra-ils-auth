@@ -27,8 +27,10 @@ def temp_db_path():
 
 @pytest.fixture
 def auth_db(temp_db_path):
-    """Create an AuthDB instance."""
-    return AuthDB(Path(temp_db_path))
+    """An AuthDB with a configured viewer role (v2 seeds only admin)."""
+    db = AuthDB(Path(temp_db_path))
+    db.apply_seed_roles({"viewer": ["view-instance", "view-database-collection"]})
+    return db
 
 
 @pytest.fixture
@@ -97,7 +99,7 @@ class TestActorFromRequest:
 
     def test_returns_actor_for_valid_session(self, datasette_instance, auth_db):
         """Should return actor dict for valid session."""
-        auth_db.create_user("testuser", "Test User")
+        auth_db.create_user("testuser", "Test User", default_role="viewer")
 
         payload = {"id": "testuser", "ts": time.time()}
         cookie = datasette_instance.sign(payload, "sierra-auth")
@@ -116,7 +118,7 @@ class TestActorFromRequest:
 
     def test_actor_includes_permissions(self, datasette_instance, auth_db):
         """Actor should include user's permissions."""
-        auth_db.create_user("testuser")
+        auth_db.create_user("testuser", default_role="viewer")
 
         payload = {"id": "testuser", "ts": time.time()}
         cookie = datasette_instance.sign(payload, "sierra-auth")

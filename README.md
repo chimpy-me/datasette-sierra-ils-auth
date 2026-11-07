@@ -93,19 +93,69 @@ Users with the `admin` role or `manage-users` permission can access:
 The plugin creates a `sierra_auth.db` SQLite database to store:
 
 - **users** - User accounts (auto-created on first Sierra login)
-- **roles** - Available roles (viewer, staff, admin by default)
+- **roles** - Available roles (only `admin` by default; others come from `seed_roles`)
 - **user_roles** - Role assignments
 - **permissions** - Permission definitions
 - **role_permissions** - Permission assignments to roles
 - **auth_log** - Audit log of authentication events
 
-### Default Roles
+### Roles
 
-| Role | Description | Default Permissions |
-|------|-------------|---------------------|
-| `viewer` | Default for new users | `view-instance`, `view-database-collection` |
-| `staff` | Library staff | Above + `view-database-patrons` |
-| `admin` | Full access | All permissions |
+A fresh (schema v2) database has exactly one role, `admin`, which holds every
+permission. **There is no default role**: a user created on first sign-in has no
+role and no permissions until an administrator grants one. Such a user who reaches
+a protected page sees "You are signed in as `<login>` but have no role yet; ask
+the administrator." (status 403).
+
+Define other roles in Datasette metadata under the plugin's key:
+
+```yaml
+plugins:
+  datasette-sierra-ils-auth:
+    default_role: null          # optional; name of a role new users receive (default: none)
+    seed_roles:                 # optional; applied at startup
+      reviewer:
+        - alt-review-edit
+      viewer:
+        - view-database-collection
+```
+
+- `seed_roles` creates each role and any missing permission rows, idempotently. It
+  never removes a grant an administrator made through the admin UI.
+- `default_role` names a role to give every newly created user. Leave it unset
+  (null) to give new users nothing.
+- Upgrading a v1 database keeps its roles, users and grants as they are; only
+  `roles.is_default` is cleared. v0.1.0's `viewer` and `staff` seeds are not
+  created on new databases.
+
+**Do not put `view-instance` on any role except `admin`.** This plugin's
+`permission_allowed` runs after Datasette's built-in default and the last non-None
+result wins, so a role holding `view-instance` returns `True` and overrides an
+instance-level `allow: false`: every signed-in holder could then see the whole
+instance, even one that is locked down.
+
+### Redirects and links honour `base_url`
+
+Every redirect and link the plugin emits goes through `datasette.urls.path()`, so
+it works when Datasette is served under a prefix (`--setting base_url /alt-review/`).
+`SIERRA_AUTH_LOGIN_REDIRECT` is a path relative to `base_url`.
+
+## Changelog
+
+### 0.2.0
+
+- **Breaking:** no default role. `viewer` and `staff` are no longer seeded; new
+  users have no role until granted one. Schema version is now 2 (v1 databases
+  migrate in place; existing roles and grants are kept, `is_default` is cleared).
+- New plugin config `seed_roles` and `default_role` (see Roles).
+- A signed-in user with no role who is denied a page sees a "no role yet" 403 page
+  (a `forbidden` hook, plus the plugin's own admin pages).
+- All redirects and links (login, logout, admin bounce, menu, templates) respect
+  Datasette's `base_url`; `SIERRA_AUTH_LOGIN_REDIRECT` is relative to it.
+
+### 0.1.0
+
+- Initial release.
 
 ### Persisting the Database (Docker/Podman)
 

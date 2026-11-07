@@ -158,7 +158,14 @@ async def test_login_creates_user_on_first_login(temp_db_path, mock_sierra_clien
 
     with patch.dict("os.environ", {"SIERRA_AUTH_DB_PATH": temp_db_path}, clear=True):
         with patch("datasette_sierra_ils_auth.views.get_sierra_client", return_value=mock_sierra_client):
-            datasette = Datasette(memory=True)
+            datasette = Datasette(
+                memory=True,
+                metadata={"plugins": {"datasette-sierra-ils-auth": {
+                    "default_role": "viewer",
+                    "seed_roles": {"viewer": ["view-database-collection"]},
+                }}},
+            )
+            await datasette.invoke_startup()
 
             login_page = await datasette.client.get("/-/sierra-auth/login")
             csrftoken = extract_csrftoken(login_page)
