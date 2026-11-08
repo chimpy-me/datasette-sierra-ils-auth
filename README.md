@@ -163,6 +163,11 @@ it works when Datasette is served under a prefix (`--setting base_url /alt-revie
 
 ## Changelog
 
+### 0.3.1
+
+- Release-only: the PyPI publish workflow can check out the repo (job permissions gain
+  `contents: read`). The code is the same as 0.3.0, which was never published to PyPI.
+
 ### 0.3.0
 
 - The session cookie is set with `Secure`.
