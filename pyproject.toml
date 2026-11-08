@@ -1,6 +1,6 @@
 [project]
 name = "datasette-sierra-ils-auth"
-version = "0.2.0"
+version = "0.3.0"
 description = "Datasette plugin for authenticating staff users against Sierra ILS REST API"
 readme = "README.md"
 authors = [{name = "Ray Voelker"}]

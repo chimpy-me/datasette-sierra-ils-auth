@@ -163,6 +163,13 @@ it works when Datasette is served under a prefix (`--setting base_url /alt-revie
 
 ## Changelog
 
+### 0.3.0
+
+- The session cookie is set with `Secure`.
+- Local passwords (the built-in admin) are hashed with scrypt (n=16384, r=8, p=1) and
+  compared in constant time. 0.2.0 `salt$sha256` hashes still verify; the admin row is
+  rehashed at the next startup.
+
 ### 0.2.0
 
 - **Breaking:** no default role. `viewer` and `staff` are no longer seeded; new
