@@ -181,6 +181,7 @@ async def login(datasette, request):
         datasette.sign({"id": user["sierra_login"], "ts": time.time()}, "sierra-auth"),
         max_age=COOKIE_MAX_AGE,
         httponly=True,
+        secure=True,
         samesite="lax",
     )
     return response
