@@ -22,10 +22,18 @@ def db_path():
     Path(f.name).unlink(missing_ok=True)
 
 
+LEGACY_ROLES = {
+    "viewer": ["view-instance", "view-database-collection"],
+    "staff": ["view-instance", "view-database-collection", "view-database-patrons"],
+}
+
+
 @pytest.fixture
 def auth_db(db_path):
-    """Create an AuthDB instance with a fresh database."""
-    return AuthDB(db_path)
+    """An AuthDB with the v0.1.0 viewer/staff roles configured via seed_roles."""
+    db = AuthDB(db_path)
+    db.apply_seed_roles(LEGACY_ROLES)
+    return db
 
 
 class TestMigration:
@@ -70,9 +78,7 @@ class TestMigration:
         roles = [row[0] for row in cursor.fetchall()]
         conn.close()
 
-        assert "viewer" in roles
-        assert "staff" in roles
-        assert "admin" in roles
+        assert roles == ["admin"]  # v2 seeds only admin
 
     def test_migrate_seeds_default_permissions(self, db_path):
         """Migration should seed default permissions."""
@@ -102,7 +108,7 @@ class TestMigration:
         conn.close()
 
         assert version == SCHEMA_VERSION
-        assert role_count == 3  # Still just 3 roles
+        assert role_count == 1  # Still just the admin role
 
 
 class TestAuthDBUsers:
@@ -113,7 +119,7 @@ class TestAuthDBUsers:
 
     def test_create_user(self, auth_db):
         """create_user should create a user with default roles."""
-        user = auth_db.create_user("testuser", "Test User")
+        user = auth_db.create_user("testuser", "Test User", default_role="viewer")
 
         assert user is not None
         assert user["sierra_login"] == "testuser"
@@ -130,7 +136,7 @@ class TestAuthDBUsers:
 
     def test_get_user_returns_user_with_roles(self, auth_db):
         """get_user should return user with their roles."""
-        auth_db.create_user("testuser")
+        auth_db.create_user("testuser", default_role="viewer")
         user = auth_db.get_user("testuser")
 
         assert user is not None
@@ -159,7 +165,7 @@ class TestAuthDBUsers:
 class TestAuthDBPermissions:
     def test_get_user_permissions_for_viewer(self, auth_db):
         """Viewer role should have limited permissions."""
-        user = auth_db.create_user("testuser")
+        user = auth_db.create_user("testuser", default_role="viewer")
         permissions = auth_db.get_user_permissions(user["id"])
 
         assert "view-instance" in permissions
@@ -223,14 +229,14 @@ class TestAuthDBLogging:
 
 class TestAuthDBPassword:
     def test_hash_password_returns_salted_hash(self, auth_db):
-        """hash_password should return salt$hash format."""
+        """hash_password should return scrypt$n$r$p$salt$key format."""
         hashed = auth_db.hash_password("secret123")
 
-        assert "$" in hashed
         parts = hashed.split("$")
-        assert len(parts) == 2
-        assert len(parts[0]) == 32  # 16 bytes hex = 32 chars
-        assert len(parts[1]) == 64  # SHA-256 hex = 64 chars
+        assert len(parts) == 6
+        assert parts[0] == "scrypt"
+        assert len(parts[4]) == 32  # 16 bytes hex = 32 chars
+        assert len(parts[5]) == 64  # 32-byte key hex = 64 chars
 
     def test_hash_password_unique_per_call(self, auth_db):
         """Each hash should have a unique salt."""
@@ -346,8 +352,7 @@ class TestAuthDBAdminMethods:
 
     def test_assign_role_already_assigned(self, auth_db):
         """assign_role should return False if role already assigned."""
-        user = auth_db.create_user("testuser")
-        # User already has viewer role by default
+        user = auth_db.create_user("testuser", default_role="viewer")
 
         result = auth_db.assign_role(user["id"], "viewer")
 
@@ -363,7 +368,7 @@ class TestAuthDBAdminMethods:
 
     def test_remove_role(self, auth_db):
         """remove_role should remove a role from a user."""
-        user = auth_db.create_user("testuser")
+        user = auth_db.create_user("testuser", default_role="viewer")
         assert "viewer" in user["roles"]
 
         result = auth_db.remove_role(user["id"], "viewer")
@@ -419,3 +424,35 @@ class TestAuthDBAdminMethods:
         user = auth_db.get_user_by_id(99999)
 
         assert user is None
+
+
+import hashlib
+from datasette_sierra_ils_auth.auth_db import AuthDB
+
+
+def test_hash_password_is_scrypt():
+    h = AuthDB.hash_password("correct horse")
+    kind, n, r, p, salt, key = h.split("$")
+    assert kind == "scrypt" and (n, r, p) == ("16384", "8", "1")
+    assert len(bytes.fromhex(salt)) == 16 and len(bytes.fromhex(key)) == 32
+
+
+def test_verify_roundtrip_and_wrong_password():
+    h = AuthDB.hash_password("correct horse")
+    assert AuthDB.verify_password("correct horse", h)
+    assert not AuthDB.verify_password("correct horsf", h)
+    assert AuthDB.hash_password("correct horse") != h  # fresh salt each time
+
+
+def test_verify_legacy_sha256_hash_still_works():
+    salt = "00" * 16
+    legacy = f"{salt}${hashlib.sha256((salt + 'oldpw').encode()).hexdigest()}"
+    assert AuthDB.verify_password("oldpw", legacy)
+    assert not AuthDB.verify_password("newpw", legacy)
+
+
+def test_verify_rejects_garbage():
+    assert not AuthDB.verify_password("x", "")
+    assert not AuthDB.verify_password("x", "scrypt$notanumber$8$1$zz$zz")
+    assert not AuthDB.verify_password("x", "scrypt$16384$8$1$00")
+    assert not AuthDB.verify_password("x", "scrypt$16384$8$1$zz$zz")

@@ -7,7 +7,41 @@ import time
 
 from datasette import Response
 
-from . import COOKIE_NAME, COOKIE_MAX_AGE, get_auth_db, get_sierra_client
+from .throttle import Throttle
+from . import (
+    COOKIE_NAME,
+    COOKIE_MAX_AGE,
+    get_auth_db,
+    get_plugin_config,
+    get_sierra_client,
+    has_no_role,
+    no_role_response,
+)
+
+LOGIN_PATH = "/-/sierra-auth/login"
+
+
+def get_throttle(datasette) -> Throttle:
+    """One throttle per Datasette instance."""
+    if getattr(datasette, "_sierra_throttle", None) is None:
+        datasette._sierra_throttle = Throttle()
+    return datasette._sierra_throttle
+
+
+def client_address(datasette, request) -> str:
+    """Last X-Forwarded-For hop when trust_forwarded is set, else the socket peer.
+
+    Last, not first: a trusted reverse proxy appends the address it saw, so the
+    rightmost entry is the client and earlier ones are client-supplied.
+    """
+    if get_plugin_config(datasette).get("trust_forwarded"):
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            last = forwarded.split(",")[-1].strip()
+            if last:
+                return last
+    client = request.scope.get("client")
+    return (client[0] if client else None) or ""
 
 
 async def login(datasette, request):
@@ -27,8 +61,22 @@ async def login(datasette, request):
     password = form.get("password", "")
 
     auth_db = get_auth_db(datasette)
+    throttle = get_throttle(datasette)
+    addr = client_address(datasette, request)
+
+    if throttle.blocked(sierra_login, addr):
+        auth_db.log_event(sierra_login or "(empty)", "login_throttled", "address=" + addr)
+        return Response.html(
+            await datasette.render_template(
+                "sierra_auth_login.html",
+                {"error": "Too many failed sign-in attempts; try again in 15 minutes"},
+                request=request,
+            ),
+            status=429,
+        )
 
     if not sierra_login or not password:
+        throttle.record_failure(sierra_login, addr)
         auth_db.log_event(sierra_login or "(empty)", "login_failure", "Missing credentials")
         return Response.html(
             await datasette.render_template(
@@ -41,6 +89,7 @@ async def login(datasette, request):
 
     # First, check for local password (built-in admin or other local accounts)
     authenticated = False
+    sierra_detail = None
     if auth_db.check_local_password(sierra_login, password):
         authenticated = True
     else:
@@ -64,6 +113,14 @@ async def login(datasette, request):
             )
             if response.status_code == 204:
                 authenticated = True
+            else:
+                sierra_detail = f"sierra_status={response.status_code}"
+                try:
+                    code = response.json().get("code")
+                except Exception:
+                    code = None
+                if isinstance(code, int):
+                    sierra_detail += f" code={code}"
         except Exception as e:
             auth_db.log_event(sierra_login, "login_failure", f"Sierra API error: {e}")
             return Response.html(
@@ -76,7 +133,12 @@ async def login(datasette, request):
             )
 
     if not authenticated:
-        auth_db.log_event(sierra_login, "login_failure", "Invalid credentials")
+        throttle.record_failure(sierra_login, addr)
+        auth_db.log_event(
+            sierra_login,
+            "login_failure",
+            f"Invalid credentials ({sierra_detail})" if sierra_detail else "Invalid credentials",
+        )
         return Response.html(
             await datasette.render_template(
                 "sierra_auth_login.html",
@@ -89,9 +151,13 @@ async def login(datasette, request):
     # Successful authentication - get or create local user
     user = auth_db.get_user(sierra_login)
     if not user:
-        user = auth_db.create_user(sierra_login)
+        user = auth_db.create_user(
+            sierra_login,
+            default_role=get_plugin_config(datasette).get("default_role"),
+        )
 
     if not user["is_active"]:
+        throttle.record_failure(sierra_login, addr)
         auth_db.log_event(sierra_login, "login_failure", "Account disabled")
         return Response.html(
             await datasette.render_template(
@@ -107,13 +173,15 @@ async def login(datasette, request):
     auth_db.log_event(sierra_login, "login_success")
 
     # Create signed session cookie
-    redirect_url = os.environ.get("SIERRA_AUTH_LOGIN_REDIRECT", "/")
+    # SIERRA_AUTH_LOGIN_REDIRECT is a path relative to base_url
+    redirect_url = datasette.urls.path(os.environ.get("SIERRA_AUTH_LOGIN_REDIRECT", "/"))
     response = Response.redirect(redirect_url)
     response.set_cookie(
         COOKIE_NAME,
         datasette.sign({"id": user["sierra_login"], "ts": time.time()}, "sierra-auth"),
         max_age=COOKIE_MAX_AGE,
         httponly=True,
+        secure=True,
         samesite="lax",
     )
     return response
@@ -121,7 +189,7 @@ async def login(datasette, request):
 
 async def logout(datasette, request):
     """Handle logout - clear the session cookie."""
-    response = Response.redirect("/")
+    response = Response.redirect(datasette.urls.path("/"))
     response.set_cookie(COOKIE_NAME, "", expires=0)
 
     # Log the logout if we can identify the user
@@ -147,11 +215,13 @@ def require_permission(permission):
         async def wrapper(datasette, request):
             actor = request.actor
             if not actor:
-                return Response.redirect("/-/sierra-auth/login")
+                return Response.redirect(datasette.urls.path(LOGIN_PATH))
 
             # Check permission
             if "admin" not in actor.get("roles", []):
                 if permission not in actor.get("_permissions", []):
+                    if has_no_role(actor):
+                        return await no_role_response(datasette, request, actor)
                     return Response.html(
                         await datasette.render_template(
                             "sierra_auth_error.html",
@@ -169,10 +239,12 @@ async def admin_users(datasette, request):
     """Admin page to list and manage users."""
     actor = request.actor
     if not actor:
-        return Response.redirect("/-/sierra-auth/login")
+        return Response.redirect(datasette.urls.path(LOGIN_PATH))
 
     # Check permission
     if "admin" not in actor.get("roles", []) and "manage-users" not in actor.get("_permissions", []):
+        if has_no_role(actor):
+            return await no_role_response(datasette, request, actor)
         return Response.html(
             await datasette.render_template(
                 "sierra_auth_error.html",
@@ -199,9 +271,11 @@ async def admin_user_edit(datasette, request):
     """Edit a specific user's roles."""
     actor = request.actor
     if not actor:
-        return Response.redirect("/-/sierra-auth/login")
+        return Response.redirect(datasette.urls.path(LOGIN_PATH))
 
     if "admin" not in actor.get("roles", []) and "manage-users" not in actor.get("_permissions", []):
+        if has_no_role(actor):
+            return await no_role_response(datasette, request, actor)
         return Response.html(
             await datasette.render_template(
                 "sierra_auth_error.html",

@@ -3,11 +3,14 @@ Local SQLite database for authorization (users, roles, permissions).
 """
 
 import hashlib
+import hmac
 import secrets
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -69,29 +72,19 @@ CREATE TABLE auth_log (
 """
 
 SEED_SQL = """
--- Default roles
+-- v2 seeds only the admin role. Other roles come from the `seed_roles` plugin
+-- config. Never seed `view-instance` onto a non-admin role: the plugin's
+-- permission_allowed runs after Datasette's default and the last non-None
+-- result wins, so a True here would beat an instance-level `allow: false`.
 INSERT OR IGNORE INTO roles (name, description, is_default) VALUES
-    ('viewer', 'Can view public collection data only', 1),
-    ('staff', 'Can view collection and patron data', 0),
     ('admin', 'Full access including user management', 0);
 
--- Default permissions
 INSERT OR IGNORE INTO permissions (name, description) VALUES
     ('view-instance', 'View Datasette instance'),
     ('view-database-collection', 'View collection database'),
     ('view-database-patrons', 'View patrons database'),
     ('execute-sql', 'Execute arbitrary SQL queries'),
     ('manage-users', 'Manage user roles and permissions');
-
--- viewer: collection only
-INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
-SELECT r.id, p.id FROM roles r, permissions p
-WHERE r.name = 'viewer' AND p.name IN ('view-instance', 'view-database-collection');
-
--- staff: collection + patrons
-INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
-SELECT r.id, p.id FROM roles r, permissions p
-WHERE r.name = 'staff' AND p.name IN ('view-instance', 'view-database-collection', 'view-database-patrons');
 
 -- admin: everything
 INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
@@ -126,14 +119,15 @@ def migrate(db_path: Path) -> None:
         current = get_schema_version(conn)
 
         if current < 1:
+            # Fresh database: build the v2 schema directly.
             conn.executescript(SCHEMA_SQL)
             conn.executescript(SEED_SQL)
-            set_schema_version(conn, 1)
-
-        # Future migrations:
-        # if current < 2:
-        #     conn.execute("ALTER TABLE ...")
-        #     set_schema_version(conn, 2)
+            set_schema_version(conn, SCHEMA_VERSION)
+        elif current < 2:
+            # v1 -> v2: no role is a default any more (see `default_role`
+            # plugin config). Existing roles, users and grants are untouched.
+            conn.execute("UPDATE roles SET is_default = 0")
+            set_schema_version(conn, 2)
     finally:
         conn.close()
 
@@ -177,8 +171,13 @@ class AuthDB:
         """, (user_id,))
         return [row["name"] for row in cursor.fetchall()]
 
-    def create_user(self, sierra_login: str, display_name: str | None = None) -> dict:
-        """Create a new user with default roles."""
+    def create_user(
+        self,
+        sierra_login: str,
+        display_name: str | None = None,
+        default_role: str | None = None,
+    ) -> dict:
+        """Create a new user. With no `default_role` the user has no role."""
         conn = self._connect()
         try:
             cursor = conn.execute(
@@ -187,14 +186,54 @@ class AuthDB:
             )
             user_id = cursor.lastrowid
 
-            # Assign default roles
-            conn.execute("""
-                INSERT INTO user_roles (user_id, role_id)
-                SELECT ?, id FROM roles WHERE is_default = 1
-            """, (user_id,))
+            if default_role:
+                conn.execute("""
+                    INSERT INTO user_roles (user_id, role_id)
+                    SELECT ?, id FROM roles WHERE name = ?
+                """, (user_id, default_role))
 
             conn.commit()
             return self.get_user(sierra_login)
+        finally:
+            conn.close()
+
+    def apply_seed_roles(self, seed_roles: dict[str, list[str]]) -> None:
+        """Create roles and missing permission rows from config, idempotently.
+
+        Never removes a grant an admin made.
+        """
+        conn = self._connect()
+        try:
+            for role, permissions in seed_roles.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO roles (name, is_default) VALUES (?, 0)",
+                    (role,),
+                )
+                for permission in permissions:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO permissions (name) VALUES (?)",
+                        (permission,),
+                    )
+                    conn.execute("""
+                        INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
+                        SELECT r.id, p.id FROM roles r, permissions p
+                        WHERE r.name = ? AND p.name = ?
+                    """, (role, permission))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def role_permissions(self, role_name: str) -> list[str]:
+        """Permission names granted to a role, sorted."""
+        conn = self._connect()
+        try:
+            cursor = conn.execute("""
+                SELECT p.name FROM permissions p
+                JOIN role_permissions rp ON rp.permission_id = p.id
+                JOIN roles r ON r.id = rp.role_id
+                WHERE r.name = ? ORDER BY p.name
+            """, (role_name,))
+            return [row["name"] for row in cursor.fetchall()]
         finally:
             conn.close()
 
@@ -238,19 +277,32 @@ class AuthDB:
 
     @staticmethod
     def hash_password(password: str) -> str:
-        """Hash a password with a random salt using SHA-256."""
-        salt = secrets.token_hex(16)
-        hash_obj = hashlib.sha256((salt + password).encode())
-        return f"{salt}${hash_obj.hexdigest()}"
+        """Hash a password with a random salt using scrypt."""
+        salt = secrets.token_bytes(16)
+        key = hashlib.scrypt(
+            password.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32
+        )
+        return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${key.hex()}"
 
     @staticmethod
     def verify_password(password: str, password_hash: str) -> bool:
-        """Verify a password against a hash."""
+        """Verify a password against a scrypt hash or a legacy 0.2.0 salt$sha256 hash."""
         if not password_hash or "$" not in password_hash:
             return False
+        if password_hash.startswith("scrypt$"):
+            try:
+                _, n, r, p, salt_hex, key_hex = password_hash.split("$")
+                stored = bytes.fromhex(key_hex)
+                candidate = hashlib.scrypt(
+                    password.encode(), salt=bytes.fromhex(salt_hex),
+                    n=int(n), r=int(r), p=int(p), dklen=len(stored),
+                )
+            except (ValueError, TypeError):
+                return False
+            return hmac.compare_digest(candidate, stored)
         salt, stored_hash = password_hash.split("$", 1)
-        hash_obj = hashlib.sha256((salt + password).encode())
-        return hash_obj.hexdigest() == stored_hash
+        candidate_hex = hashlib.sha256((salt + password).encode()).hexdigest()
+        return hmac.compare_digest(candidate_hex.encode(), stored_hash.encode())
 
     def create_or_update_admin(self, password: str) -> dict:
         """Create or update the built-in admin account."""

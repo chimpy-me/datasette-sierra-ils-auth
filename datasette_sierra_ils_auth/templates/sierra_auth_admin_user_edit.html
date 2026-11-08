@@ -9,7 +9,7 @@
 <p style="color: green; background: #e8f5e9; padding: 10px; border-radius: 4px;">{{ message }}</p>
 {% endif %}
 
-<p><a href="/-/sierra-auth/admin/users">&larr; Back to user list</a></p>
+<p><a href="{{ urls.path('/-/sierra-auth/admin/users') }}">&larr; Back to user list</a></p>
 
 <form method="post">
     <input type="hidden" name="csrftoken" value="{{ csrftoken() }}">
