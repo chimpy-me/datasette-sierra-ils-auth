@@ -3,11 +3,14 @@ Local SQLite database for authorization (users, roles, permissions).
 """
 
 import hashlib
+import hmac
 import secrets
 import sqlite3
 from pathlib import Path
 
 SCHEMA_VERSION = 2
+
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -274,19 +277,32 @@ class AuthDB:
 
     @staticmethod
     def hash_password(password: str) -> str:
-        """Hash a password with a random salt using SHA-256."""
-        salt = secrets.token_hex(16)
-        hash_obj = hashlib.sha256((salt + password).encode())
-        return f"{salt}${hash_obj.hexdigest()}"
+        """Hash a password with a random salt using scrypt."""
+        salt = secrets.token_bytes(16)
+        key = hashlib.scrypt(
+            password.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32
+        )
+        return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${key.hex()}"
 
     @staticmethod
     def verify_password(password: str, password_hash: str) -> bool:
-        """Verify a password against a hash."""
+        """Verify a password against a scrypt hash or a legacy 0.2.0 salt$sha256 hash."""
         if not password_hash or "$" not in password_hash:
             return False
+        if password_hash.startswith("scrypt$"):
+            try:
+                _, n, r, p, salt_hex, key_hex = password_hash.split("$")
+                stored = bytes.fromhex(key_hex)
+                candidate = hashlib.scrypt(
+                    password.encode(), salt=bytes.fromhex(salt_hex),
+                    n=int(n), r=int(r), p=int(p), dklen=len(stored),
+                )
+            except (ValueError, TypeError):
+                return False
+            return hmac.compare_digest(candidate, stored)
         salt, stored_hash = password_hash.split("$", 1)
-        hash_obj = hashlib.sha256((salt + password).encode())
-        return hash_obj.hexdigest() == stored_hash
+        candidate_hex = hashlib.sha256((salt + password).encode()).hexdigest()
+        return hmac.compare_digest(candidate_hex.encode(), stored_hash.encode())
 
     def create_or_update_admin(self, password: str) -> dict:
         """Create or update the built-in admin account."""
